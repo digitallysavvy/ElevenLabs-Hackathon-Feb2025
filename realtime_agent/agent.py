@@ -184,6 +184,7 @@ class RealtimeKitAgent:
             
             # Subscribe to audio
             await self.channel.subscribe_audio(self.subscribe_user)
+            logger.info(f"Subscribed to audio for user {self.subscribe_user}")
 
             disconnected_future = asyncio.Future[None]()
 
@@ -195,8 +196,8 @@ class RealtimeKitAgent:
 
             self.channel.on("connection_state_changed", callback)
 
-            # Only need model_to_rtc now since audio_interface handles input
-            asyncio.create_task(self.model_to_rtc()).add_done_callback(log_exception)
+            # All rtc to model audio is handled by AgoraAudioInterface
+            logger.info("Starting _process_model_messages task")
             asyncio.create_task(self._process_model_messages()).add_done_callback(
                 log_exception
             )
