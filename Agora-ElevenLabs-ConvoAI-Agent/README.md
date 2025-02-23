@@ -13,10 +13,10 @@ Before running the demo, ensure you have the following installed and configured:
   - [Login to Agora](https://console.agora.io/en/)
   - Create a [New Project](https://console.agora.io/projects), using `Secured mode: APP ID + Token` to obtain an App ID and App Certificate.
 
-- OpenAI account:
+- Elevate account:
 
-  - [Login to OpenAI](https://platform.openai.com/signup)
-  - Go to Dashboard and [obtain your API key](https://platform.openai.com/api-keys).
+  - [Login to Elevate](https://elevenlabs.io/app/sign-in)
+  - Go to Dashboard and [obtain your API key](https://elevenlabs.io/app/settings/api-keys) and create a [ConvoAI Agent](https://elevenlabs.io/app/conversational-ais).
 
 - Additional Packages:
 
