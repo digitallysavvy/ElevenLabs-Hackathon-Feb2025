@@ -3,7 +3,7 @@ import base64
 import logging
 import os
 from builtins import anext
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, List
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import time
@@ -14,7 +14,17 @@ from attr import dataclass
 from agora_realtime_ai_api.rtc import Channel, ChatMessage, RtcEngine, RtcOptions
 
 from .logger import setup_logger
-from .realtime.struct import ErrorMessage, FunctionCallOutputItemParam, InputAudioBufferCommitted, InputAudioBufferSpeechStarted, InputAudioBufferSpeechStopped, InputAudioTranscription, ItemCreate, ItemCreated, ItemInputAudioTranscriptionCompleted, RateLimitsUpdated, ResponseAudioDelta, ResponseAudioDone, ResponseAudioTranscriptDelta, ResponseAudioTranscriptDone, ResponseContentPartAdded, ResponseContentPartDone, ResponseCreate, ResponseCreated, ResponseDone, ResponseFunctionCallArgumentsDelta, ResponseFunctionCallArgumentsDone, ResponseOutputItemAdded, ResponseOutputItemDone, ServerVADUpdateParams, SessionUpdate, SessionUpdateParams, SessionUpdated, Voices, to_json
+from .realtime.struct import (
+    ErrorMessage, FunctionCallOutputItemParam, InputAudioBufferCommitted, 
+    InputAudioBufferSpeechStarted, InputAudioBufferSpeechStopped, InputAudioTranscription, 
+    ItemCreate, ItemCreated, ItemInputAudioTranscriptionCompleted, RateLimitsUpdated, 
+    ResponseAudioDelta, ResponseAudioDone, ResponseAudioTranscriptDelta, 
+    ResponseAudioTranscriptDone, ResponseContentPartAdded, ResponseContentPartDone, 
+    ResponseCreate, ResponseCreated, ResponseDone, ResponseFunctionCallArgumentsDelta, 
+    ResponseFunctionCallArgumentsDone, ResponseOutputItemAdded, ResponseOutputItemDone, 
+    ServerVADUpdateParams, SessionUpdate, SessionUpdateParams, SessionUpdated, 
+    Voices, to_json
+)
 from .realtime.connection import RealtimeApiConnection
 from .tools import ClientToolCallResponse, ToolContext
 from .utils import PCMWriter
@@ -38,6 +48,18 @@ def _monitor_queue_size(queue: asyncio.Queue, queue_name: str, threshold: int = 
 
 
 async def wait_for_remote_user(channel: Channel) -> int:
+    """
+    Wait for a remote user to join the Agora RTC channel.
+    
+    Args:
+        channel: The Agora RTC channel instance
+        
+    Returns:
+        int: The user ID of the first remote user that joins
+        
+    Raises:
+        Exception: If timeout occurs or other errors happen while waiting
+    """
     remote_users = list(channel.remote_users.keys())
     if len(remote_users) > 0:
         return remote_users[0]
@@ -60,12 +82,29 @@ async def wait_for_remote_user(channel: Channel) -> int:
 
 @dataclass(frozen=True, kw_only=True)
 class InferenceConfig:
+    """
+    Configuration settings for the real-time inference.
+    
+    Attributes:
+        system_message: Initial system prompt for the model
+        turn_detection: Parameters for voice activity detection
+        voice: Voice settings for text-to-speech
+    """
     system_message: str | None = None
     turn_detection: ServerVADUpdateParams | None = None  # MARK: CHECK!
     voice: Voices | None = None
 
 
 class RealtimeKitAgent:
+    """
+    Agent that handles real-time audio communication between Agora RTC and OpenAI's real-time API.
+    
+    This agent:
+    - Processes audio from Agora RTC and sends it to OpenAI
+    - Receives responses from OpenAI and plays them through Agora RTC
+    - Handles function calls and tool usage
+    - Manages the bi-directional audio stream
+    """
     engine: RtcEngine
     channel: Channel
     connection: RealtimeApiConnection
@@ -90,6 +129,15 @@ class RealtimeKitAgent:
         inference_config: InferenceConfig,
         tools: ToolContext | None,
     ) -> None:
+        """
+        Set up and run the real-time agent with the specified configuration.
+        
+        Args:
+            engine: The Agora RTC engine instance
+            options: RTC connection options
+            inference_config: Configuration for the inference model
+            tools: Optional tools/functions available to the model
+        """
         channel = engine.create_channel(options)
         await channel.connect()
 
@@ -157,7 +205,7 @@ class RealtimeKitAgent:
         logger.info(f"Write PCM: {self.write_pcm}")
 
         # Add audio send queue
-        self._audio_send_queue = asyncio.Queue()
+        self._audio_send_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self.is_running = True
 
         # Create audio interface with input callback
@@ -167,23 +215,31 @@ class RealtimeKitAgent:
         )
 
     async def _process_audio_send_queue(self):
-        """Process audio chunks from queue and send to connection"""
-        try:
-            while self.is_running:
+        """
+        Process audio chunks from Agora RTC and send them to OpenAI's API.
+        Runs continuously in the background, taking audio chunks from the queue
+        and sending them as base64-encoded data.
+        """
+        while self.is_running:
+            try:
                 audio_chunk = await self._audio_send_queue.get()
-                try:
-                    # Send raw audio bytes directly
-                    await self.connection.send_audio_data(audio_chunk)
-                except Exception as e:
-                    logger.error(f"Error sending audio data: {e}")
-                finally:
-                    self._audio_send_queue.task_done()
-        except asyncio.CancelledError:
-            logger.info("Audio send queue processor cancelled")
-        except Exception as e:
-            logger.error(f"Error in audio send queue processor: {e}")
+                await self.connection.send_request({
+                    "type": "input_audio_data",
+                    "audio": base64.b64encode(audio_chunk).decode()
+                })
+            except Exception as e:
+                logger.error(f"Error processing audio chunk: {e}")
+                await asyncio.sleep(0.1)
 
     async def run(self) -> None:
+        """
+        Main loop for the agent. Handles:
+        - Waiting for remote user connection
+        - Setting up audio processing
+        - Managing audio subscriptions
+        - Processing model messages
+        - Cleanup on shutdown
+        """
         try:
             def log_exception(t: asyncio.Task[Any]) -> None:
                 if not t.cancelled() and t.exception():
@@ -196,20 +252,31 @@ class RealtimeKitAgent:
             self.subscribe_user = await wait_for_remote_user(self.channel)
             logger.info(f"Subscribing to user {self.subscribe_user}")
             
-            # Start the audio send queue processor
-            audio_processor_task = asyncio.create_task(
-                self._process_audio_send_queue()
-            )
-            audio_processor_task.add_done_callback(log_exception)
+            # Start the audio send queue processor only if not using ElevenLabs integration.
+            if not getattr(self, 'use_elevenlabs', False):
+                audio_processor_task = asyncio.create_task(
+                    self._process_audio_send_queue()
+                )
+                audio_processor_task.add_done_callback(log_exception)
             
-            # Start the audio interface with queue-based callback
-            self.audio_interface.start(
-                input_callback=lambda audio: self._audio_send_queue.put_nowait(audio)
-            )
+            # Start the audio interface.
+            # Use a different input_callback if using ElevenLabs.
+            if getattr(self, 'use_elevenlabs', False):
+                # In ElevenLabsAgent, the conversation (in conversation.py) calls
+                # self.audio_interface.start(input_callback) itself.
+                logger.info("Skipping audio_interface.start() in RealtimeKitAgent (ElevenLabs mode)")
+            else:
+                self.audio_interface.start(
+                    input_callback=lambda audio: self._audio_send_queue.put_nowait(audio)
+                )
             
             # Subscribe to audio
             await self.channel.subscribe_audio(self.subscribe_user)
-            logger.info(f"Subscribed to audio for user {self.subscribe_user}")
+            logger.info(f"Successfully subscribed to audio for user {self.subscribe_user}")
+
+            # Verify subscription worked
+            if not self.channel.is_subscribed_to_audio(self.subscribe_user):
+                logger.error(f"Failed to subscribe to audio for user {self.subscribe_user}")
 
             disconnected_future = asyncio.Future[None]()
 
@@ -243,7 +310,11 @@ class RealtimeKitAgent:
             self.audio_interface.stop()
 
     async def model_to_rtc(self) -> None:
-        """Handle audio output from the model to RTC"""
+        """
+        Handle audio output from the model to RTC.
+        Takes audio frames from the queue and sends them through the audio interface.
+        Also handles PCM writing for debugging if enabled.
+        """
         pcm_writer = PCMWriter(prefix="model_to_rtc", write_pcm=self.write_pcm)
 
         try:
@@ -258,6 +329,12 @@ class RealtimeKitAgent:
             raise
 
     async def handle_funtion_call(self, message: ResponseFunctionCallArgumentsDone) -> None:
+        """
+        Execute tool/function calls requested by the model and send back the results.
+        
+        Args:
+            message: Contains function name and arguments from the model
+        """
         function_call_response = await self.tools.execute_tool(message.name, message.arguments)
         logger.info(f"Function call response: {function_call_response}")
         await self.connection.send_request(
@@ -273,6 +350,15 @@ class RealtimeKitAgent:
         )
 
     async def _process_model_messages(self) -> None:
+        """
+        Process all incoming messages from the model.
+        Handles various message types including:
+        - Audio deltas (speech output)
+        - Transcripts
+        - Speech detection events
+        - Function calls
+        - Various status updates
+        """
         async for message in self.connection.listen():
             # logger.info(f"Received message {message=}")
             match message:
@@ -364,128 +450,41 @@ class ConversationConfig:
 
 
 class ElevenLabsAgent:
-    """Agent that integrates ElevenLabs with Agora RTC"""
+    """
+    Agent that integrates ElevenLabs' conversational AI with Agora RTC.
+    
+    This agent:
+    - Manages connection between Agora RTC and ElevenLabs' API
+    - Handles audio streaming in both directions
+    - Manages conversation state and reconnection logic
+    - Provides tool integration capabilities
+    """
     
     def __init__(
         self,
-        channel: Channel,
-        config: ElevenLabsConfig,
-        tools: Optional[ToolContext] = None,
-        max_workers: int = 4  # Add thread pool size configuration
+        channel,
+        config: ConversationConfig,
+        tools: Optional[List[ToolContext]] = None,
+        max_workers: int = 4
     ):
         self.channel = channel
         self.config = config
         self.tools = tools
         self.subscribe_user = None
         self.conversation: Optional[Conversation] = None
-        self._disconnected_future: Optional[asyncio.Future] = None
-        # Add thread pool for handling blocking operations
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="ElevenLabsAgent"
-        )
+        self._thread_pool = ThreadPoolExecutor(max_workers)
         self._start_time = time.time()
-
-    async def _run_blocking(self, func, *args, **kwargs):
-        """Run blocking function in thread pool with timing"""
-        start_time = time.time()
-        try:
-            return await asyncio.get_running_loop().run_in_executor(
-                self._thread_pool,
-                partial(func, *args, **kwargs)
-            )
-        finally:
-            duration = time.time() - start_time
-            logger.debug(f"Operation '{func.__name__}' took {duration:.3f}s")
-
-    async def setup(self):
-        """Setup the agent with proper error handling and timing"""
-        try:
-            setup_start = time.time()
-            logger.info("Starting agent setup")
-            
-            # Validate config first
-            self.config.validate()
-            
-            # Setup logging based on config
-            if self.config.debug_logging:
-                logger.setLevel(logging.DEBUG)
-            
-            await self._setup_agent()
-            
-            setup_duration = time.time() - setup_start
-            logger.info(f"Agent setup completed in {setup_duration:.3f}s")
-            
-        except Exception as e:
-            error = handle_error(e)
-            logger.error(f"Setup failed: {error.message}")
-            if error.details:
-                logger.debug(f"Error details: {error.details}")
-            raise error
-
-    async def run(self):
-        """Run the agent with proper cleanup"""
-        run_start = time.time()
-        try:
-            await self.setup()
-            
-            # Start conversation in background task
-            conversation_task = asyncio.create_task(
-                self._run_conversation(),
-                name="ElevenLabs-Conversation"
-            )
-            
-            # Wait for disconnect or conversation end
-            await self._disconnected_future
-            
-        except Exception as e:
-            logger.error(f"Error running agent: {e}")
-            raise
-        finally:
-            await self.stop()
-            run_duration = time.time() - run_start
-            logger.info(f"Agent ran for {run_duration:.3f}s")
-
-    async def stop(self):
-        """Stop the agent and cleanup resources"""
-        try:
-            if self.conversation:
-                await self.conversation.end_session()
-                self.conversation = None
-                
-            if self.channel:
-                await self.channel.disconnect()
-                
-            if self._disconnected_future and not self._disconnected_future.done():
-                self._disconnected_future.set_result(None)
-                
-            # Shutdown thread pool
-            self._thread_pool.shutdown(wait=True)
-            
-            total_duration = time.time() - self._start_time
-            logger.info(f"Agent stopped after running for {total_duration:.3f}s")
-            
-        except Exception as e:
-            logger.error(f"Error stopping agent: {e}")
-
-    async def _run_conversation(self):
-        """Run the conversation with proper error handling"""
-        try:
-            # Start conversation session
-            await self.conversation.start_session()
-            
-            # Wait for session end
-            conversation_id = await self.conversation.wait_for_session_end()
-            if conversation_id:
-                logger.info(f"Conversation ended with ID: {conversation_id}")
-            
-        except Exception as e:
-            logger.error(f"Error in conversation: {e}")
-            if not self._disconnected_future.done():
-                self._disconnected_future.set_result(None)
+        self._disconnected_future = None
+        self.audio_interface = None
 
     async def _setup_agent(self):
-        """Internal setup implementation"""
+        """
+        Internal setup for the ElevenLabs agent:
+        - Waits for remote user connection
+        - Sets up audio interface
+        - Configures reconnection handling
+        - Initializes ElevenLabs client
+        """
         logger.info("Setting up ElevenLabs agent")
         
         # Wait for remote user
@@ -496,64 +495,49 @@ class ElevenLabsAgent:
         # Create ElevenLabs client
         client = ElevenLabs(api_key=self.config.api_key)
         
-        # Create audio interface
-        audio_interface = AgoraAudioInterface(
-            channel=self.channel, 
+        # Create audio interface with the remote user ID
+        self.audio_interface = AgoraAudioInterface(
+            channel=self.channel,
+            remote_uid=self.subscribe_user,  # Pass the remote user ID
             loop=asyncio.get_running_loop()
         )
         
-        # Create conversation configuration
-        config_override = ConversationConfigOverride(
-            voice_id=self.config.voice_id,
-            model_id=self.config.model,
-            temperature=self.config.temperature,
-            stream=self.config.stream,
-            latency_optimization=self.config.latency_optimization,
-        )
+        # Add reconnection handler
+        async def handle_connection_error():
+            logger.info("Handling WebSocket connection error")
+            if self.conversation:
+                try:
+                    # Wait a moment before reconnecting
+                    await asyncio.sleep(1)
+                    
+                    # Try to gracefully end current session
+                    try:
+                        await self.conversation.end_session()
+                    except Exception as e:
+                        logger.warning(f"Error ending session: {e}")
+                    
+                    # Create a new conversation instance
+                    self.conversation = AsyncConversation(
+                        Conversation(
+                            client=client,
+                            agent_id=self.config.agent_id,
+                            requires_auth=True,
+                            audio_interface=self.audio_interface,  # Use the stored audio interface
+                            config=self.conversation_config,
+                            client_tools=self.tools if self.tools else None,
+                        )
+                    )
+                    
+                    # Start new session
+                    await self.conversation.start_session()
+                    logger.info("Successfully reconnected to ElevenLabs")
+                    
+                except Exception as e:
+                    logger.error(f"Error reconnecting: {e}")
+                    # If reconnection fails, stop the agent
+                    await self.stop()
         
-        conversation_config = ConversationInitiationData(
-            conversation_config_override=config_override.to_dict(),
-            dynamic_variables=self.config.dynamic_variables or {},
-            extra_body=self.config.extra_config or {}
-        )
-        
-        logger.info(f"Using conversation config: {conversation_config}")
-        
-        # Create conversation with proper config
-        self.conversation = AsyncConversation(
-            Conversation(
-                client=client,
-                agent_id=self.config.agent_id,
-                requires_auth=True,
-                audio_interface=audio_interface,
-                config=conversation_config,
-                client_tools=self.tools if self.tools else None,
-            )
-        )
-        
-        # Set up disconnect handling
-        self._disconnected_future = asyncio.Future()
-        
-        def on_connection_state_changed(
-            agora_rtc_conn: RTCConnection,
-            conn_info: RTCConnInfo,
-            reason: Any
-        ):
-            logger.info(f"Connection state changed: {conn_info.state}")
-            if conn_info.state == 1 and not self._disconnected_future.done():
-                self._disconnected_future.set_result(None)
-                
-        self.channel.on("connection_state_changed", on_connection_state_changed)
-        
-        # Handle user leaving
-        async def on_user_left(agora_rtc_conn: RTCConnection, user_id: int, reason: int):
-            logger.info(f"User left: {user_id}")
-            if self.subscribe_user == user_id:
-                self.subscribe_user = None
-                logger.info("Subscribed user left, disconnecting")
-                await self.stop()
-                
-        self.channel.on("user_left", on_user_left)
+        self.audio_interface._on_connection_error = handle_connection_error
 
     async def wait_for_remote_user(self) -> int:
         """Wait for a remote user to join the channel"""
@@ -568,3 +552,94 @@ class ElevenLabsAgent:
             return await asyncio.wait_for(future, timeout=15.0)
         except asyncio.TimeoutError:
             raise RuntimeError("Timeout waiting for remote user")
+
+    async def run(self) -> None:
+        """
+        Main execution loop for the ElevenLabs agent:
+        - Sets up the agent and conversation
+        - Configures connection state handling
+        - Manages the conversation session
+        - Handles cleanup on shutdown
+        """
+        try:
+            # Set up the agent
+            await self._setup_agent()
+            
+            # Create conversation configuration
+            self.conversation_config = ConversationInitiationData(
+                conversation_config_override=ConversationConfigOverride(
+                    voice_id=self.config.voice_id,
+                    model_id=self.config.model,
+                    temperature=self.config.temperature,
+                    stream=self.config.stream,
+                    latency_optimization=self.config.latency_optimization,
+                ).to_dict(),
+                dynamic_variables=self.config.dynamic_variables or {},
+                extra_body=self.config.extra_config or {}
+            )
+            
+            logger.info(f"Using conversation config: {self.conversation_config}")
+            
+            # Create conversation with proper config
+            client = ElevenLabs(api_key=self.config.api_key)
+            self.conversation = AsyncConversation(
+                Conversation(
+                    client=client,
+                    agent_id=self.config.agent_id,
+                    requires_auth=True,
+                    audio_interface=self.audio_interface,
+                    config=self.conversation_config,
+                    client_tools=self.tools if self.tools else None,
+                )
+            )
+            
+            # Set up disconnect handling
+            self._disconnected_future = asyncio.Future()
+            
+            def on_connection_state_changed(
+                agora_rtc_conn: RTCConnection,
+                conn_info: RTCConnInfo,
+                reason: Any
+            ):
+                logger.info(f"Connection state changed: {conn_info.state}")
+                if conn_info.state == 1 and not self._disconnected_future.done():
+                    self._disconnected_future.set_result(None)
+                    
+            self.channel.on("connection_state_changed", on_connection_state_changed)
+            
+            # Handle user leaving
+            async def on_user_left(agora_rtc_conn: RTCConnection, user_id: int, reason: int):
+                logger.info(f"User left: {user_id}")
+                if self.subscribe_user == user_id:
+                    self.subscribe_user = None
+                    logger.info("Subscribed user left, disconnecting")
+                    await self.stop()
+                    
+            self.channel.on("user_left", on_user_left)
+            
+            # Start the conversation
+            await self.conversation.start_session()
+            
+            # Wait for disconnect
+            await self._disconnected_future
+            
+        except Exception as e:
+            logger.error(f"Error running agent: {e}", exc_info=True)
+            raise
+        finally:
+            await self.stop()
+
+    async def stop(self):
+        """Stop the agent"""
+        try:
+            if self.conversation:
+                await self.conversation.end_session()
+            
+            if self.audio_interface:
+                self.audio_interface.stop()
+                
+            if self._thread_pool:
+                self._thread_pool.shutdown(wait=True)
+                
+        except Exception as e:
+            logger.error(f"Error stopping agent: {e}", exc_info=True)
