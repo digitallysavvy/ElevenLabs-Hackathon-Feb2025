@@ -109,7 +109,9 @@ class AgoraAudioInterface(AudioInterface):
         self.loop = loop if loop is not None else asyncio.get_running_loop()
         self._input_buffer = bytearray()
         self._chunks_sent = 0
-        self.thread_pool = ThreadPoolExecutor(max_workers=1)
+        # Add a queue for thread-safe audio chunk handling
+        self._audio_queue = asyncio.Queue()
+        self._input_processor_task = None
 
     def _resample_audio(self, audio: bytes, from_rate: int, to_rate: int) -> bytes:
         """Resample audio between different sample rates using high-quality polyphase filtering.
@@ -126,8 +128,8 @@ class AgoraAudioInterface(AudioInterface):
             input_samples = len(audio) // 2  # Since we're using int16, each sample is 2 bytes
             expected_output_samples = int(input_samples * (to_rate / from_rate))
             
-            logger.info(f"Resampling audio: from={from_rate}Hz ({input_samples} samples) "
-                       f"to={to_rate}Hz (expect {expected_output_samples} samples)")
+            # logger.info(f"Resampling audio: from={from_rate}Hz ({input_samples} samples) "
+            #            f"to={to_rate}Hz (expect {expected_output_samples} samples)")
             
             # Convert bytes to numpy array
             audio_array = np.frombuffer(audio, dtype=np.int16)
@@ -137,7 +139,7 @@ class AgoraAudioInterface(AudioInterface):
             up_factor = to_rate // gcd
             down_factor = from_rate // gcd
             
-            logger.info(f"Resample factors: up={up_factor}, down={down_factor} (GCD={gcd})")
+            # logger.info(f"Resample factors: up={up_factor}, down={down_factor} (GCD={gcd})")
             
             resampled = signal.resample_poly(
                 audio_array, 
@@ -150,8 +152,8 @@ class AgoraAudioInterface(AudioInterface):
             resampled = np.clip(resampled, np.iinfo(np.int16).min, np.iinfo(np.int16).max)
             actual_output_samples = len(resampled)
             
-            logger.info(f"Resampling complete: got {actual_output_samples} samples "
-                       f"(expected {expected_output_samples})")
+            # logger.info(f"Resampling complete: got {actual_output_samples} samples "
+            #            f"(expected {expected_output_samples})")
             
             # Validate the resampling ratio
             actual_ratio = actual_output_samples / input_samples
@@ -174,10 +176,11 @@ class AgoraAudioInterface(AudioInterface):
             self._input_callback = input_callback
             logger.info(f"Input callback set: {input_callback is not None}")
             
-            # Start the input processing task
+            # Start the input processing tasks
             if self._input_task is None:
                 self._input_task = self.loop.create_task(self._process_input())
-                logger.info("Created input processing task")
+                self._input_processor_task = self.loop.create_task(self._process_audio_queue())
+                logger.info("Created input processing tasks")
             
             # Start the playback task if not already running
             if self._playback_task is None:
@@ -188,27 +191,39 @@ class AgoraAudioInterface(AudioInterface):
             logger.error(f"Error starting audio interface: {e}")
             raise
 
+    async def _process_audio_queue(self):
+        """Process audio chunks from the queue and send them to ElevenLabs"""
+        while self.is_running:
+            try:
+                chunk = await self._audio_queue.get()
+                if self._input_callback:
+                    try:
+                        # Since we're already in the event loop thread, we can call the callback directly
+                        self._input_callback(chunk)
+                        self._chunks_sent += 1
+                        logger.info(f"Successfully sent chunk {self._chunks_sent} to ElevenLabs")
+                        # Add a small delay to prevent flooding
+                        await asyncio.sleep(0.05)  # 50ms delay between chunks
+                    except Exception as e:
+                        logger.error(f"Error in input callback: {e}", exc_info=True)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error processing audio queue: {e}", exc_info=True)
+                await asyncio.sleep(0.1)
+
     async def _process_input(self):
-        """Continuously process incoming audio frames from Agora.
-        
-        - Retrieves audio frames from the Agora channel
-        - Resamples audio from Agora's 24kHz to ElevenLabs' 16kHz
-        - Buffers audio until enough samples are collected
-        - Sends audio chunks to ElevenLabs via callback
-        - Handles connection errors and automatic recovery
-        """
+        """Continuously process incoming audio frames from Agora"""
         logger.info(f"Starting input processing for remote user {self.remote_uid}")
         
         while self.is_running:
             try:
-                # Get audio frames from the channel
                 audio_frames = self.channel.get_audio_frames(self.remote_uid)
                 if not audio_frames:
                     logger.debug("Waiting for audio frames to become available...")
                     await asyncio.sleep(0.1)
                     continue
                 
-                # Check if audio_frames is an async iterator
                 if not hasattr(audio_frames, '__aiter__'):
                     logger.error(f"Audio frames object is not an async iterator: {type(audio_frames)}")
                     await asyncio.sleep(0.1)
@@ -231,32 +246,11 @@ class AgoraAudioInterface(AudioInterface):
                         # Add to input buffer
                         self._input_buffer.extend(resampled_audio)
                         
-                        # If we have enough samples, send to ElevenLabs
-                        while len(self._input_buffer) >= self.INPUT_BUFFER_SIZE * 2:  # *2 because 16-bit samples
-                            if self._input_callback:
-                                # Send raw audio chunk directly
-                                chunk = bytes(self._input_buffer[:self.INPUT_BUFFER_SIZE * 2])
-                                try:
-                                    # Log before sending
-                                    logger.info(f"About to send chunk to callback, buffer size: {len(chunk)} bytes")
-                                    
-                                    # schedule the callback on the current event loop thread.
-                                    self.loop.call_soon_threadsafe(self._input_callback, chunk)
-                                    self._chunks_sent += 1
-                                    logger.info(f"Successfully sent chunk {self._chunks_sent} to ElevenLabs")
-                                except (ConnectionError, websockets.exceptions.ConnectionClosed) as e:
-                                    logger.error(f"WebSocket connection error: {e}")
-                                    # Signal that we need to reconnect
-                                    if hasattr(self, '_on_connection_error'):
-                                        await self._on_connection_error()
-                                    break
-                                except Exception as e:
-                                    logger.error(f"Error in input_callback: {e}", exc_info=True)
-                                finally:
-                                    # Remove the processed samples from buffer
-                                    self._input_buffer = self._input_buffer[self.INPUT_BUFFER_SIZE * 2:]
-                            else:
-                                logger.warning("No input callback set, dropping audio chunk")
+                        # If we have enough samples, queue for processing
+                        while len(self._input_buffer) >= self.INPUT_BUFFER_SIZE * 2:
+                            chunk = bytes(self._input_buffer[:self.INPUT_BUFFER_SIZE * 2])
+                            await self._audio_queue.put(chunk)
+                            self._input_buffer = self._input_buffer[self.INPUT_BUFFER_SIZE * 2:]
                     
                     except Exception as frame_error:
                         logger.error(f"Error processing audio frame: {frame_error}", exc_info=True)
@@ -276,16 +270,17 @@ class AgoraAudioInterface(AudioInterface):
             self._input_callback = None
             
             # Cancel tasks
-            if self._input_task:
-                self._input_task.cancel()
-                self._input_task = None
-                
-            if self._playback_task:
-                self._playback_task.cancel()
-                self._playback_task = None
-                
+            for task in [self._input_task, self._playback_task, self._input_processor_task]:
+                if task:
+                    task.cancel()
+            
+            self._input_task = None
+            self._playback_task = None
+            self._input_processor_task = None
+            
             # Clear buffer
             self.buffer_manager.clear()
+            self._input_buffer.clear()
             
             logger.info("AgoraAudioInterface stopped successfully")
         except Exception as e:
