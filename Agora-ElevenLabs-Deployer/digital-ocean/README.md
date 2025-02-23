@@ -96,7 +96,7 @@ The infrastructure consists of:
 
 - Container Registry: Hosts Docker images for the proxy router and realtime agents
 - Multiple Agent Instances (3 droplets):
-  - Handles OpenAI API communication
+  - Handles ElevenLabs API communication
   - Runs on c-4 instances (4 vCPUs, 8GB RAM)
   - Containerized using Docker
 - Proxy Router:
