@@ -113,60 +113,22 @@ class AgoraAudioInterface(AudioInterface):
         self._audio_queue = asyncio.Queue()
         self._input_processor_task = None
 
-    def _resample_audio(self, audio: bytes, from_rate: int, to_rate: int) -> bytes:
-        """Resample audio between different sample rates using high-quality polyphase filtering.
+    def _resample_audio(self, audio_data: bytes, src_rate: int, dst_rate: int) -> bytes:
+        # Convert raw bytes (16-bit PCM) into a NumPy array
+        samples = np.frombuffer(audio_data, dtype=np.int16)
         
-        Args:
-            audio: Raw audio bytes in int16 format
-            from_rate: Original sample rate in Hz
-            to_rate: Target sample rate in Hz
-            
-        Returns:
-            Resampled audio bytes in int16 format
-        """
-        try:
-            input_samples = len(audio) // 2  # Since we're using int16, each sample is 2 bytes
-            expected_output_samples = int(input_samples * (to_rate / from_rate))
-            
-            # logger.info(f"Resampling audio: from={from_rate}Hz ({input_samples} samples) "
-            #            f"to={to_rate}Hz (expect {expected_output_samples} samples)")
-            
-            # Convert bytes to numpy array
-            audio_array = np.frombuffer(audio, dtype=np.int16)
-            
-            # Use polyphase filtering for better quality
-            gcd = np.gcd(to_rate, from_rate)
-            up_factor = to_rate // gcd
-            down_factor = from_rate // gcd
-            
-            # logger.info(f"Resample factors: up={up_factor}, down={down_factor} (GCD={gcd})")
-            
-            resampled = signal.resample_poly(
-                audio_array, 
-                up=up_factor,
-                down=down_factor,
-                window=('kaiser', 5.0)
-            )
-            
-            # Ensure the output is int16 and properly scaled
-            resampled = np.clip(resampled, np.iinfo(np.int16).min, np.iinfo(np.int16).max)
-            actual_output_samples = len(resampled)
-            
-            # logger.info(f"Resampling complete: got {actual_output_samples} samples "
-            #            f"(expected {expected_output_samples})")
-            
-            # Validate the resampling ratio
-            actual_ratio = actual_output_samples / input_samples
-            expected_ratio = to_rate / from_rate
-            if not np.isclose(actual_ratio, expected_ratio, rtol=0.1):
-                logger.error(f"Resampling ratio mismatch: got {actual_ratio:.3f}, "
-                            f"expected {expected_ratio:.3f}")
-            
-            return resampled.astype(np.int16).tobytes()
-            
-        except Exception as e:
-            logger.error(f"Error resampling audio: {e}", exc_info=True)
-            return audio
+        # Calculate the expected new number of samples
+        new_length = int(len(samples) * dst_rate / src_rate)
+        
+        # Convert samples to float32 for resampling
+        float_samples = samples.astype(np.float32)
+        
+        # Do the resampling
+        resampled = signal.resample(float_samples, new_length)
+        
+        # Clip and convert back to int16
+        resampled_int16 = np.clip(resampled, -32768, 32767).astype(np.int16)
+        return resampled_int16.tobytes()
 
     def start(self, input_callback: Callable[[bytes], None]):
         """Start processing audio with the given input callback"""
@@ -198,12 +160,21 @@ class AgoraAudioInterface(AudioInterface):
                 chunk = await self._audio_queue.get()
                 if self._input_callback:
                     try:
-                        # Since we're already in the event loop thread, we can call the callback directly
+                        # Log the chunk being sent
+                        logger.info(f"Sending audio chunk to ElevenLabs, size: {len(chunk)} bytes")
+                        
+                        # Check if chunk contains actual audio data
+                        if any(b != 0 for b in chunk):
+                            logger.info("Chunk contains non-zero audio data")
+                        else:
+                            logger.warning("Chunk contains only zeros!")
+                            
                         self._input_callback(chunk)
                         self._chunks_sent += 1
                         logger.info(f"Successfully sent chunk {self._chunks_sent} to ElevenLabs")
-                        # Add a small delay to prevent flooding
-                        await asyncio.sleep(0.05)  # 50ms delay between chunks
+                        
+                        # Use a consistent delay between chunks
+                        await asyncio.sleep(0.25)  # 250ms matches the chunk duration
                     except Exception as e:
                         logger.error(f"Error in input callback: {e}", exc_info=True)
             except asyncio.CancelledError:
@@ -218,24 +189,30 @@ class AgoraAudioInterface(AudioInterface):
         
         while self.is_running:
             try:
+                # Get audio frames from the channel
                 audio_frames = self.channel.get_audio_frames(self.remote_uid)
                 if not audio_frames:
                     logger.debug("Waiting for audio frames to become available...")
                     await asyncio.sleep(0.1)
                     continue
                 
+                # Check if audio_frames is an async iterator
                 if not hasattr(audio_frames, '__aiter__'):
                     logger.error(f"Audio frames object is not an async iterator: {type(audio_frames)}")
                     await asyncio.sleep(0.1)
                     continue
                 
                 logger.info(f"Audio frames available for user {self.remote_uid}")
+                logger.info(f"Received audio frames from Agora: {type(audio_frames)}")
                 
                 async for audio_frame in audio_frames:
                     if not self.is_running:
                         break
                     
                     try:
+                        # Log the raw audio frame data
+                        logger.info(f"Raw audio frame size: {len(audio_frame.data)} bytes")
+                        
                         # Process the audio frame
                         resampled_audio = self._resample_audio(
                             audio_frame.data, 
@@ -243,12 +220,19 @@ class AgoraAudioInterface(AudioInterface):
                             self.ELEVENLABS_SAMPLE_RATE
                         )
                         
+                        # Log the resampled audio size
+                        logger.info(f"Resampled audio size: {len(resampled_audio)} bytes")
+                        
                         # Add to input buffer
                         self._input_buffer.extend(resampled_audio)
+                        
+                        # Log buffer size
+                        logger.info(f"Current input buffer size: {len(self._input_buffer)} bytes")
                         
                         # If we have enough samples, queue for processing
                         while len(self._input_buffer) >= self.INPUT_BUFFER_SIZE * 2:
                             chunk = bytes(self._input_buffer[:self.INPUT_BUFFER_SIZE * 2])
+                            logger.info(f"Queuing chunk of size: {len(chunk)} bytes")
                             await self._audio_queue.put(chunk)
                             self._input_buffer = self._input_buffer[self.INPUT_BUFFER_SIZE * 2:]
                     
