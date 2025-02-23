@@ -1,0 +1,21 @@
+config:
+  pulumi:template: typescript
+  # AWS
+  aws:accessKey:
+    secure: AAABAHRIeSoB+SlQNpYfn+wgnywNLgIMmJia8qXWtq86NhGDKtff/xSXlYyEYdluaan7SA==
+  aws:secretKey:
+    secure: AAABAKEd0tC2FTw3vL+zytZjhP0Km8QawhmRhLlORa/pfs3mwzIcSd550+Ohn6gYQPNUP1CiM+GrXBkgPqW7zo5eGL0+PlwH
+  aws:region: us-east-1
+  custom-conversational-ai-aws:agoraAppCert:
+    secure: AAABANzGTqNL/uSQsoTOC8VOmubpY7IVs/8VBFHqBicHhCtZ726x8JtBz7dONnTTXwcva2fnN69zsktbVi+Fmw==
+  custom-conversational-ai-aws:agoraAppId:
+    secure: AAABAMJF+52fSLSL0aqbb6CZ3DKGJK7LuScWG5YAGX0CIMA3V0cHbuvNVWDv+g7DEwY9r2LKDWMvWvrV7qh7lA==
+  custom-conversational-ai-aws:allowOrigin: '*'
+  custom-conversational-ai-aws:mappingTtlInSeconds: '3600'
+  custom-conversational-ai-aws:maxRequestsPerBackend: '11'
+  custom-conversational-ai-aws:elevenLabsApiKey:
+    secure: AAABAJ4/glw/dSCZCF/klQ1WCnJEM0MUZjmE/sKvGKVOaKSs0kTx2E7pwGWFZJXiN6MH0W2Kk3ALxHCaXFlJOJeETz4BVebvNwP/b9mkylbwCFQ=
+  custom-conversational-ai-aws:elevenLabsAgentID: 13pGjMCIW4Uq5Xby2stM
+  custom-conversational-ai-aws:elevenLabsVoiceID: XrExE9yKIg1WjnnlVkGX
+  custom-conversational-ai-aws:elevenLabsModel: eleven_flash_v2_5
+  custom-conversational-ai-aws:proxyPort: '8080'

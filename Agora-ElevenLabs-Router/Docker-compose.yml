@@ -1,0 +1,22 @@
+version: '3'
+services:
+  app:
+    build: .
+    ports:
+      - '${PORT:-8080}:${PORT:-8080}'
+    environment:
+      - BACKEND_IPS=${BACKEND_IPS}
+      - MAX_REQUESTS_PER_BACKEND=${MAX_REQUESTS_PER_BACKEND}
+      - REDIS_URL=${REDIS_URL}
+      - PORT=${PORT:-8080}
+      - ALLOW_ORIGIN=${ALLOW_ORIGIN:-*}
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    ports:
+      - '6379:6379'
+
+volumes:
+  redis_data:

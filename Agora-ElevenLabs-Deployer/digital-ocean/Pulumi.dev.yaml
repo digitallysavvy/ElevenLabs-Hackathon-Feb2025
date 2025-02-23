@@ -1,0 +1,21 @@
+config:
+  pulumi:template: typescript
+  # DigitalOcean
+  digitalocean:token:
+    secure: ''
+  custom-conversational-ai-digitalocean:agoraAppCert:
+    secure: ''
+  custom-conversational-ai-digitalocean:agoraAppId:
+    secure: ''
+  custom-conversational-ai-digitalocean:allowOrigin: '*'
+  custom-conversational-ai-digitalocean:mappingTtlInSeconds: '3600'
+  custom-conversational-ai-digitalocean:maxRequestsPerBackend: '11'
+  custom-conversational-ai-digitalocean:elevenLabsApiKey:
+    secure: ''
+  custom-conversational-ai-digitalocean:elevenLabsAgentID:
+    secure: ''
+  custom-conversational-ai-digitalocean:elevenLabsVoiceID:
+    secure: ''
+  custom-conversational-ai-digitalocean:elevenLabsModel: eleven_flash_v2_5
+  custom-conversational-ai-digitalocean:proxyPort: '8080'
+  custom-conversational-ai-digitalocean:systemInstruction: Your custom system prompt here...
