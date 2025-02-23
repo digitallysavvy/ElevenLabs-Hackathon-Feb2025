@@ -240,12 +240,8 @@ class AgoraAudioInterface(AudioInterface):
                                     # Log before sending
                                     logger.info(f"About to send chunk to callback, buffer size: {len(chunk)} bytes")
                                     
-                                    # Call the callback in a thread-safe way
-                                    await self.loop.run_in_executor(
-                                        self.thread_pool,
-                                        self._input_callback,
-                                        chunk
-                                    )
+                                    # schedule the callback on the current event loop thread.
+                                    self.loop.call_soon_threadsafe(self._input_callback, chunk)
                                     self._chunks_sent += 1
                                     logger.info(f"Successfully sent chunk {self._chunks_sent} to ElevenLabs")
                                 except (ConnectionError, websockets.exceptions.ConnectionClosed) as e:
