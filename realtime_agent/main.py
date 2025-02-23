@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from .realtime.struct import PCM_CHANNELS, PCM_SAMPLE_RATE, ServerVADUpdateParams, Voices
 
-from .agent import InferenceConfig, RealtimeKitAgent, ElevenLabsAgent
+from .agent import InferenceConfig, ElevenLabsAgent
 from agora_realtime_ai_api.rtc import RtcEngine, RtcOptions
 from .logger import setup_logger
 from .parse_args import parse_args, parse_args_realtimekit
