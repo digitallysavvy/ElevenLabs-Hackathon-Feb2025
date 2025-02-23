@@ -186,7 +186,7 @@ class AgoraAudioInterface(AudioInterface):
                 try:
                     # Log raw frame details
                     input_samples = len(audio_frame.data) // 2
-                    logger.info(f"Frame {frame_count}: Received raw audio frame: "
+                    logger.info(f"Frame {frame_count}: Processing raw audio frame: "
                               f"size={len(audio_frame.data)} bytes ({input_samples} samples)")
                     
                     # Resample the audio
@@ -197,32 +197,33 @@ class AgoraAudioInterface(AudioInterface):
                     )
                     
                     output_samples = len(resampled_audio) // 2
-                    logger.info(f"Frame {frame_count}: Resampled audio: "
+                    logger.info(f"Frame {frame_count}: Processed resampled audio: "
                               f"size={len(resampled_audio)} bytes ({output_samples} samples)")
                     
                     # Add to input buffer
                     self._input_buffer.extend(resampled_audio)
+                    logger.info(f"Frame {frame_count}: Added to input buffer, current size: {len(self._input_buffer)} bytes")
                     
                     # If we have enough samples, send to ElevenLabs
                     while len(self._input_buffer) >= self.INPUT_BUFFER_SIZE * 2:  # *2 because 16-bit samples
                         if self._input_callback:
-                            # Send exactly INPUT_BUFFER_SIZE samples
+                            # Send raw audio chunk directly
                             chunk = bytes(self._input_buffer[:self.INPUT_BUFFER_SIZE * 2])
                             try:
-                                # Just base64 encode the audio chunk and send it
-                                encoded_chunk = base64.b64encode(chunk)
-                                self._input_callback(encoded_chunk)
+                                logger.info(f"Sending chunk to ElevenLabs: size={len(chunk)} bytes")
+                                self._input_callback(chunk)  # chunk is already bytes
                                 self._chunks_sent += 1
-                                logger.info(f"Sent chunk {self._chunks_sent} to ElevenLabs "
+                                logger.info(f"Successfully sent chunk {self._chunks_sent} to ElevenLabs "
                                           f"(size={len(chunk)} bytes, total chunks={self._chunks_sent})")
                             except Exception as e:
                                 logger.error(f"Error in input_callback: {e}", exc_info=True)
                             
                             # Remove the sent samples from buffer
                             self._input_buffer = self._input_buffer[self.INPUT_BUFFER_SIZE * 2:]
-                    
+                            logger.info(f"Removed sent chunk from buffer, remaining size: {len(self._input_buffer)} bytes")
+                
                 except Exception as frame_error:
-                    logger.error(f"Frame {frame_count}: Error processing audio frame: {frame_error}")
+                    logger.error(f"Frame {frame_count}: Error processing audio frame: {frame_error}", exc_info=True)
                     continue
                 
         except Exception as e:

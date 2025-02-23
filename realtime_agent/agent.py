@@ -156,12 +156,33 @@ class RealtimeKitAgent:
         self.write_pcm = os.environ.get("WRITE_AGENT_PCM", "false") == "true"
         logger.info(f"Write PCM: {self.write_pcm}")
 
+        # Add audio send queue
+        self._audio_send_queue = asyncio.Queue()
+        self.is_running = True
+
         # Create audio interface with input callback
         self.audio_interface = AgoraAudioInterface(
             channel=self.channel, 
             loop=asyncio.get_running_loop()
         )
-        
+
+    async def _process_audio_send_queue(self):
+        """Process audio chunks from queue and send to connection"""
+        try:
+            while self.is_running:
+                audio_chunk = await self._audio_send_queue.get()
+                try:
+                    # Send raw audio bytes directly
+                    await self.connection.send_audio_data(audio_chunk)
+                except Exception as e:
+                    logger.error(f"Error sending audio data: {e}")
+                finally:
+                    self._audio_send_queue.task_done()
+        except asyncio.CancelledError:
+            logger.info("Audio send queue processor cancelled")
+        except Exception as e:
+            logger.error(f"Error in audio send queue processor: {e}")
+
     async def run(self) -> None:
         try:
             def log_exception(t: asyncio.Task[Any]) -> None:
@@ -175,11 +196,15 @@ class RealtimeKitAgent:
             self.subscribe_user = await wait_for_remote_user(self.channel)
             logger.info(f"Subscribing to user {self.subscribe_user}")
             
-            # Start the audio interface with our input callback
+            # Start the audio send queue processor
+            audio_processor_task = asyncio.create_task(
+                self._process_audio_send_queue()
+            )
+            audio_processor_task.add_done_callback(log_exception)
+            
+            # Start the audio interface with queue-based callback
             self.audio_interface.start(
-                input_callback=lambda audio: asyncio.create_task(
-                    self.connection.send_audio_data(audio)
-                )
+                input_callback=lambda audio: self._audio_send_queue.put_nowait(audio)
             )
             
             # Subscribe to audio
@@ -198,9 +223,10 @@ class RealtimeKitAgent:
 
             # All rtc to model audio is handled by AgoraAudioInterface
             logger.info("Starting _process_model_messages task")
-            asyncio.create_task(self._process_model_messages()).add_done_callback(
-                log_exception
+            message_processor_task = asyncio.create_task(
+                self._process_model_messages()
             )
+            message_processor_task.add_done_callback(log_exception)
 
             await disconnected_future
             logger.info("Agent finished running")
@@ -211,6 +237,8 @@ class RealtimeKitAgent:
             logger.error(f"Error running agent: {e}")
             raise
         finally:
+            # Clean up
+            self.is_running = False
             # Make sure to stop the audio interface
             self.audio_interface.stop()
 
