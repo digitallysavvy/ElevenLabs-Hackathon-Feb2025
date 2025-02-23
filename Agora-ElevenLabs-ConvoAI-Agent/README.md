@@ -1,6 +1,6 @@
 # Realtime Agent
 
-This project demonstrates how to deliver ultra-low latency access to OpenAI with exceptional audio quality using Agora's SD-RTN and OpenAI's Realtime API. By integrating Agora's SDK with OpenAI's Realtime API, it ensures seamless performance and minimal delay across the globe.
+This project demonstrates how to deliver ultra-low latency access to ElevenLabs with exceptional audio quality using Agora's SD-RTN and ElevenLabs' ConvoAI Agent. By integrating Agora's SDK with ElevenLabs' ConvoAI Agent, it ensures seamless performance and minimal delay across the globe.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ Before running the demo, ensure you have the following installed and configured:
 <!-- <img src="./architecture.png" alt="architecture" width="700" height="400" /> -->
 <picture>
   <source srcset="architecture-dark-theme.png" media="(prefers-color-scheme: dark)">
-  <img src="architecture-light-theme.png" alt="Architecture diagram of Conversational Ai by Agora and OpenAi">
+  <img src="architecture-light-theme.png" alt="Architecture diagram of Conversational Ai by Agora and ElevenLabs">
 </picture>
 
 ## Organization of this Repo

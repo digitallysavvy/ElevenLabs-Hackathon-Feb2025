@@ -44,7 +44,7 @@ class ElevenLabsConfig:
             api_key=api_key,
             agent_id=agent_id,
             model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2"),
-            voice_id=os.getenv("ELEVENLABS_VOICE_ID", "alloy"),
+            voice_id=os.getenv("ELEVENLABS_VOICE_ID", ""),
             debug_logging=os.getenv("DEBUG_LOGGING", "false").lower() == "true",
             latency_optimization=os.getenv("LATENCY_OPTIMIZATION", "true").lower() == "true",
             stream=os.getenv("STREAM", "true").lower() == "true",

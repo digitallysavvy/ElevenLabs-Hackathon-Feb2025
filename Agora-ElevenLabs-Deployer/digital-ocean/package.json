@@ -1,0 +1,13 @@
+{
+  "name": "custom-conversational-ai-digitalocean",
+  "main": "index.ts",
+  "devDependencies": {
+    "@types/node": "^18",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@pulumi/digitalocean": "^4.37.1",
+    "@pulumi/docker": "^4.5.8",
+    "@pulumi/pulumi": "^3.113.0"
+  }
+}

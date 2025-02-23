@@ -131,12 +131,6 @@ async def start_agent(request):
             if agent_id:
                 config.agent_id = agent_id
                 
-            # Validate voice
-            if config.voice_id not in Voices.__members__.values():
-                return web.json_response(
-                    {"error": f"Invalid voice: {config.voice_id}"}, 
-                    status=400
-                )
                 
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
